@@ -69,6 +69,11 @@ def get_odds():
     except requests.exceptions.RequestException as e:
         return jsonify({"error": str(e)}), 500
 
+@app.errorhandler(404)
+def page_not_found(e):
+    # Custom handler for all other undefined routes
+    return jsonify({"error": "This route does not exist. Try / or /api/odds"}), 404
+
 if __name__ == '__main__':
     # Use 0.0.0.0 for accessibility on local network
     app.run(host='0.0.0.0', port=5000)
