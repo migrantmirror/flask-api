@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/')
+def home():
+    return "Welcome to the Flask API. Use /api/odds endpoint."
+
 @app.route('/api/odds')
 def get_odds():
     url = "https://api-football-v1.p.rapidapi.com/v2/odds/league/865927/bookmaker/5?page=2"
