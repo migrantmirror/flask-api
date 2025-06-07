@@ -8,7 +8,8 @@ CORS(app)
 
 @app.route('/')
 def home():
-    return "Welcome to the Flask API. Use /api/odds endpoint."
+    # Root route to avoid 404 errors for "/"
+    return "Welcome to the Flask API. Use the /api/odds endpoint."
 
 @app.route('/api/odds')
 def get_odds():
@@ -28,7 +29,15 @@ def get_odds():
         for item in raw_data.get("api", {}).get("odds", []):
             fixture = item.get("fixture", {})
             fixture_date_str = fixture.get("event_date") or fixture.get("fixture_date")
-            fixture_date = datetime.fromisoformat(fixture_date_str.replace("Z", "+00:00")).date()
+            if not fixture_date_str:
+                continue  # skip if date is missing
+
+            try:
+                fixture_date = datetime.fromisoformat(
+                    fixture_date_str.replace("Z", "+00:00")
+                ).date()
+            except Exception:
+                continue  # skip if date is malformed
 
             if fixture_date == today:
                 bets = item.get("bets", [])
@@ -37,12 +46,12 @@ def get_odds():
                 match_winner_odds = None
 
                 for bet in bets:
-                    if bet["label_name"] == "Correct Score":
-                        correct_score = bet["values"][:3]
-                    elif bet["label_name"] == "Over/Under":
-                        over_under = bet["values"][:2]
-                    elif bet["label_name"] == "Match Winner":
-                        match_winner_odds = bet["values"]
+                    if bet.get("label_name") == "Correct Score":
+                        correct_score = bet.get("values", [])[:3]
+                    elif bet.get("label_name") == "Over/Under":
+                        over_under = bet.get("values", [])[:2]
+                    elif bet.get("label_name") == "Match Winner":
+                        match_winner_odds = bet.get("values", [])
 
                 filtered_predictions.append({
                     "fixture_id": fixture.get("fixture_id"),
@@ -61,4 +70,5 @@ def get_odds():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
+    # Use 0.0.0.0 for accessibility on local network
     app.run(host='0.0.0.0', port=5000)
