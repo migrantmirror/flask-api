@@ -2,6 +2,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import requests
 from datetime import datetime
+import traceback
 
 app = Flask(__name__)
 CORS(app)
@@ -41,7 +42,8 @@ def get_odds():
 
         return jsonify(predictions)
 
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
+        traceback.print_exc()  # Logs full error in terminal
         return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(404)
