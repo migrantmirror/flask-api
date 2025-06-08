@@ -8,72 +8,58 @@ CORS(app)
 
 @app.route('/')
 def home():
-    # Root route to avoid 404 errors for "/"
     return "Welcome to the Flask API. Use the /api/odds endpoint."
 
 @app.route('/api/odds')
 def get_odds():
-    url = "https://api-football-v1.p.rapidapi.com/v2/odds/league/865927/bookmaker/5?page=2"
+    url = "https://football-pro.p.rapidapi.com/api/v2.0/corrections/season/17141?tz=Europe%2FAmsterdam"
     headers = {
-        "x-rapidapi-host": "api-football-v1.p.rapidapi.com",
+        "x-rapidapi-host": "football-pro.p.rapidapi.com",
         "x-rapidapi-key": "4c92911f15msh5e8dba7681d7212p141557jsnbce9e8b77d8e"
     }
+
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         raw_data = response.json()
 
         today = datetime.now(timezone.utc).date()
-        filtered_predictions = []
+        filtered_matches = []
 
-        for item in raw_data.get("api", {}).get("odds", []):
-            fixture = item.get("fixture", {})
-            fixture_date_str = fixture.get("event_date") or fixture.get("fixture_date")
+        corrections = raw_data.get("data", [])
+        for correction in corrections:
+            fixture = correction.get("fixture")
+            if not fixture:
+                continue
+
+            fixture_date_str = fixture.get("starting_at", {}).get("date")
             if not fixture_date_str:
-                continue  # skip if date is missing
+                continue
 
             try:
-                fixture_date = datetime.fromisoformat(
-                    fixture_date_str.replace("Z", "+00:00")
-                ).date()
+                fixture_date = datetime.fromisoformat(fixture_date_str).date()
             except Exception:
-                continue  # skip if date is malformed
+                continue
 
             if fixture_date == today:
-                bets = item.get("bets", [])
-                correct_score = None
-                over_under = None
-                match_winner_odds = None
-
-                for bet in bets:
-                    if bet.get("label_name") == "Correct Score":
-                        correct_score = bet.get("values", [])[:3]
-                    elif bet.get("label_name") == "Over/Under":
-                        over_under = bet.get("values", [])[:2]
-                    elif bet.get("label_name") == "Match Winner":
-                        match_winner_odds = bet.get("values", [])
-
-                filtered_predictions.append({
-                    "fixture_id": fixture.get("fixture_id"),
+                filtered_matches.append({
+                    "fixture_id": fixture.get("id"),
                     "teams": {
-                        "home": fixture.get("homeTeam", {}).get("team_name"),
-                        "away": fixture.get("awayTeam", {}).get("team_name")
+                        "home": fixture.get("participants", [{}])[0].get("name"),
+                        "away": fixture.get("participants", [{}])[1].get("name") if len(fixture.get("participants", [])) > 1 else None
                     },
-                    "correct_score": correct_score,
-                    "over_under": over_under,
-                    "match_winner_odds": match_winner_odds
+                    "start_time": fixture.get("starting_at", {}).get("time"),
+                    "venue": fixture.get("venue", {}).get("name")
                 })
 
-        return jsonify(filtered_predictions)
+        return jsonify(filtered_matches)
 
     except requests.exceptions.RequestException as e:
         return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(404)
 def page_not_found(e):
-    # Custom handler for all other undefined routes
     return jsonify({"error": "This route does not exist. Try / or /api/odds"}), 404
 
 if __name__ == '__main__':
-    # Use 0.0.0.0 for accessibility on local network
     app.run(host='0.0.0.0', port=5000)
