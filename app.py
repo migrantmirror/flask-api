@@ -16,7 +16,7 @@ def get_odds():
     url = "https://api-football-v1.p.rapidapi.com/v2/odds/league/865927/bookmaker/5?page=2"
     headers = {
         "x-rapidapi-host": "api-football-v1.p.rapidapi.com",
-        "x-rapidapi-key": "04bbd874ddmshbc1a243b2925c63p16b9fdjsn3acacc503dd8"
+        "x-rapidapi-key": "4c92911f15msh5e8dba7681d7212p141557jsnbce9e8b77d8e"
     }
     try:
         response = requests.get(url, headers=headers)
