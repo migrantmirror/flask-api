@@ -1,163 +1,231 @@
-import os
-import math
-import threading
-import traceback
-from datetime import datetime, timedelta
-
-import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import requests
+from datetime import datetime, timedelta
+import math
+import os
+import threading
+import traceback
 
 app = Flask(__name__)
 CORS(app)
 
-# Secure API Keys from environment
-FOOTBALL_API_TOKEN = os.getenv("FOOTBALL_API_TOKEN")
-ODDS_API_KEY = os.getenv("ODDS_API_KEY")
-WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
-
-API_BASE = "https://api.football-data.org/v4"
-ODDS_BASE = "https://api.the-odds-api.com/v4"
-WEATHER_BASE = "https://api.openweathermap.org/data/2.5/weather"
+API_BASE_URL = "https://api.football-data.org/v4"
+FOOTBALL_API_TOKEN = os.environ.get("FOOTBALL_API_TOKEN", "a99f297052584b1f85b4a62734cbd330")
 
 HEADERS = {"X-Auth-Token": FOOTBALL_API_TOKEN}
 
-# Caching
+# Thread-safe cache for team stats with TTL
 class CacheItem:
     def __init__(self, data, expires_at):
         self.data = data
         self.expires_at = expires_at
 
-def ttl_cache(ttl):
-    store, lock = {}, threading.Lock()
-    def decorator(fn):
-        def wrapper(*args):
-            key = (fn.__name__,) + args
-            with lock:
-                item = store.get(key)
-                if item and item.expires_at > datetime.utcnow():
-                    return item.data
-            result = fn(*args)
-            with lock:
-                store[key] = CacheItem(result, datetime.utcnow() + timedelta(seconds=ttl))
-            return result
-        return wrapper
-    return decorator
+team_stats_cache = {}
+cache_lock = threading.Lock()
+CACHE_TTL_SECONDS = 3600  # 1 hour cache
 
-# Standings endpoint
-@app.route('/api/standings')
-@ttl_cache(1800)
-def standings():
-    league = request.args.get("league")
-    if not league:
-        return jsonify({"error": "league param is required"}), 400
-    r = requests.get(f"{API_BASE}/competitions/{league}/standings", headers=HEADERS)
-    r.raise_for_status()
-    return jsonify(r.json())
+def get_cached_team_stats(team_id):
+    with cache_lock:
+        item = team_stats_cache.get(team_id)
+        if item and item.expires_at > datetime.utcnow():
+            return item.data
+        return None
 
-# Lineups endpoint
-@app.route('/api/lineups')
-@ttl_cache(900)
-def lineups():
-    match_id = request.args.get("match_id")
-    if not match_id:
-        return jsonify({"error": "match_id is required"}), 400
-    r = requests.get(f"{API_BASE}/matches/{match_id}/lineups", headers=HEADERS)
-    r.raise_for_status()
-    return jsonify(r.json())
-
-# Odds detail endpoint
-@app.route('/api/odds_detail')
-@ttl_cache(300)
-def odds_detail():
-    match_id = request.args.get("match_id")
-    if not match_id:
-        return jsonify({"error": "match_id is required"}), 400
-    r = requests.get(
-        f"{ODDS_BASE}/sports/soccer/odds",
-        params={"apiKey": ODDS_API_KEY, "regions": "uk", "markets": "h2h,totals", "matchId": match_id}
-    )
-    r.raise_for_status()
-    return jsonify(r.json())
-
-# Historical results
-@app.route('/api/history')
-@ttl_cache(3600)
-def history():
-    team_id = request.args.get("team_id")
-    if not team_id:
-        return jsonify({"error": "team_id is required"}), 400
-    four_months_ago = datetime.utcnow() - timedelta(days=120)
-    r = requests.get(
-        f"{API_BASE}/teams/{team_id}/matches",
-        headers=HEADERS,
-        params={"dateFrom": four_months_ago.strftime("%Y-%m-%d"), "status": "FINISHED"}
-    )
-    r.raise_for_status()
-    return jsonify(r.json())
-
-# Weather endpoint
-@app.route('/api/weather')
-def weather():
-    city = request.args.get("city")
-    if not city:
-        return jsonify({"error": "city is required"}), 400
-    r = requests.get(WEATHER_BASE, params={"q": city, "appid": WEATHER_API_KEY, "units": "metric"})
-    r.raise_for_status()
-    d = r.json()
-    return jsonify({"temp": d["main"]["temp"], "weather": d["weather"][0]["description"]})
-
-# Poisson and Kelly
+def set_cached_team_stats(team_id, data):
+    with cache_lock:
+        expires_at = datetime.utcnow() + timedelta(seconds=CACHE_TTL_SECONDS)
+        team_stats_cache[team_id] = CacheItem(data, expires_at)
 
 def poisson(lmbda, k):
     return (lmbda ** k) * math.exp(-lmbda) / math.factorial(k)
 
-def implied_prob(o):
-    return 1 / o if o else 0
+def fetch_team_matches(team_id, days=60):
+    # Fetch finished matches for team within last `days`
+    date_to = datetime.utcnow()
+    date_from = date_to - timedelta(days=days)
+    url = f"{API_BASE_URL}/teams/{team_id}/matches"
+    params = {
+        "dateFrom": date_from.strftime("%Y-%m-%d"),
+        "dateTo": date_to.strftime("%Y-%m-%d"),
+        "status": "FINISHED"
+    }
+    r = requests.get(url, headers=HEADERS, params=params)
+    r.raise_for_status()
+    return r.json().get("matches", [])
 
-def kelly_fraction(p, b):
-    q = 1 - p
-    return max(0, (b * p - q) / b)
+def calculate_attack_defense(team_id):
+    cached = get_cached_team_stats(team_id)
+    if cached:
+        return cached
+
+    matches = fetch_team_matches(team_id)
+    if not matches:
+        return None, None
+
+    goals_for = 0
+    goals_against = 0
+    for m in matches:
+        if m["homeTeam"]["id"] == team_id:
+            goals_for += m["score"]["fullTime"]["home"]
+            goals_against += m["score"]["fullTime"]["away"]
+        else:
+            goals_for += m["score"]["fullTime"]["away"]
+            goals_against += m["score"]["fullTime"]["home"]
+
+    attack = goals_for / len(matches)
+    defense = goals_against / len(matches)
+    set_cached_team_stats(team_id, (attack, defense))
+    return attack, defense
+
+def expected_goals_dynamic(home_attack, away_defense, avg_home_goals,
+                           away_attack, home_defense, avg_away_goals):
+    exp_home = home_attack * away_defense * avg_home_goals
+    exp_away = away_attack * home_defense * avg_away_goals
+    return exp_home, exp_away
+
+# Caching for live matches
+live_matches_cache = CacheItem(data=None, expires_at=datetime.utcnow())
+live_matches_lock = threading.Lock()
+LIVE_MATCHES_CACHE_TTL = 300  # 5 minutes cache
+
+@app.route('/')
+def home():
+    return "Welcome to the Flask API. Use /api/predict with params: home_team_id, away_team_id, home_odds, draw_odds, away_odds."
 
 @app.route('/api/predict')
 def predict():
     try:
-        home_avg = float(request.args.get("home_avg", 1.5))
-        away_avg = float(request.args.get("away_avg", 1.2))
-        home_odds = float(request.args.get("home_odds", 2.1))
-        draw_odds = float(request.args.get("draw_odds", 3.3))
-        away_odds = float(request.args.get("away_odds", 3.1))
+        home_team_id = request.args.get("home_team_id", type=int)
+        away_team_id = request.args.get("away_team_id", type=int)
+        home_odds = request.args.get("home_odds", type=float)
+        draw_odds = request.args.get("draw_odds", type=float)
+        away_odds = request.args.get("away_odds", type=float)
 
-        matrix = [[poisson(home_avg, i) * poisson(away_avg, j) for j in range(6)] for i in range(6)]
+        if not all([home_team_id, away_team_id, home_odds, draw_odds, away_odds]):
+            return jsonify({"error": "Missing required parameters: home_team_id, away_team_id, home_odds, draw_odds, away_odds"}), 400
 
-        home_win_prob = sum(matrix[i][j] for i in range(6) for j in range(6) if i > j)
-        draw_prob = sum(matrix[i][i] for i in range(6))
-        away_win_prob = sum(matrix[i][j] for i in range(6) for j in range(6) if i < j)
+        home_attack, home_defense = calculate_attack_defense(home_team_id)
+        away_attack, away_defense = calculate_attack_defense(away_team_id)
 
-        imp_home, imp_draw, imp_away = map(implied_prob, [home_odds, draw_odds, away_odds])
+        if None in [home_attack, home_defense, away_attack, away_defense]:
+            return jsonify({"error": "Not enough data to calculate team stats"}), 400
 
-        value_bets = [side for side, mp, ip in [
-            ("home", home_win_prob, imp_home),
-            ("draw", draw_prob, imp_draw),
-            ("away", away_win_prob, imp_away)
-        ] if mp > ip + 0.05]
+        # For now, average league goals estimated from team stats (improvable with league-wide data)
+        avg_home_goals = (home_attack + away_defense) / 2
+        avg_away_goals = (away_attack + home_defense) / 2
 
-        stakes = {side: round(kelly_fraction(mp, odds), 3) for side, mp, odds in [
-            ("home", home_win_prob, home_odds),
-            ("draw", draw_prob, draw_odds),
-            ("away", away_win_prob, away_odds)
-        ]}
+        exp_home, exp_away = expected_goals_dynamic(
+            home_attack, away_defense, avg_home_goals,
+            away_attack, home_defense, avg_away_goals
+        )
 
-        return jsonify({
-            "prob_home": round(home_win_prob, 3),
-            "prob_draw": round(draw_prob, 3),
-            "prob_away": round(away_win_prob, 3),
+        max_goals = 5
+        home_probs = [poisson(exp_home, i) for i in range(max_goals + 1)]
+        away_probs = [poisson(exp_away, i) for i in range(max_goals + 1)]
+
+        home_win_prob = 0
+        draw_prob = 0
+        away_win_prob = 0
+        for i in range(max_goals + 1):
+            for j in range(max_goals + 1):
+                p = home_probs[i] * away_probs[j]
+                if i > j:
+                    home_win_prob += p
+                elif i == j:
+                    draw_prob += p
+                else:
+                    away_win_prob += p
+
+        def implied_prob(odds):
+            try:
+                return 1 / odds
+            except Exception:
+                return None
+
+        imp_home = implied_prob(home_odds)
+        imp_draw = implied_prob(draw_odds)
+        imp_away = implied_prob(away_odds)
+
+        margin = 0.05
+        value_bets = []
+        if imp_home and home_win_prob > imp_home + margin:
+            value_bets.append("home_win")
+        if imp_draw and draw_prob > imp_draw + margin:
+            value_bets.append("draw")
+        if imp_away and away_win_prob > imp_away + margin:
+            value_bets.append("away_win")
+
+        result = {
+            "teams": {"home_team_id": home_team_id, "away_team_id": away_team_id},
+            "expected_goals": {"home": round(exp_home, 2), "away": round(exp_away, 2)},
+            "outcome_probabilities": {
+                "home_win": round(home_win_prob, 3),
+                "draw": round(draw_prob, 3),
+                "away_win": round(away_win_prob, 3),
+            },
+            "bookmaker_odds": {"home": home_odds, "draw": draw_odds, "away": away_odds},
+            "implied_probabilities": {
+                "home": round(imp_home, 3) if imp_home else None,
+                "draw": round(imp_draw, 3) if imp_draw else None,
+                "away": round(imp_away, 3) if imp_away else None,
+            },
             "value_bets": value_bets,
-            "suggested_stakes": stakes
-        })
+        }
+
+        return jsonify(result)
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/live-matches')
+def live_matches():
+    try:
+        date_from = request.args.get("dateFrom", datetime.utcnow().strftime("%Y-%m-%d"))
+        date_to = request.args.get("dateTo", datetime.utcnow().strftime("%Y-%m-%d"))
+
+        with live_matches_lock:
+            # Check cache expiry
+            if live_matches_cache.data and live_matches_cache.expires_at > datetime.utcnow():
+                return jsonify(live_matches_cache.data)
+
+            # Fetch live/upcoming matches from external API
+            url = f"{API_BASE_URL}/matches"
+            params = {
+                "dateFrom": date_from,
+                "dateTo": date_to,
+                # You can add more filters if needed
+            }
+            response = requests.get(url, headers=HEADERS, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            matches = data.get("matches", [])
+
+            # Simplify matches data to only essential info
+            simplified_matches = []
+            for m in matches:
+                simplified_matches.append({
+                    "match_id": m.get("id"),
+                    "utc_date": m.get("utcDate"),
+                    "status": m.get("status"),
+                    "home_team": m.get("homeTeam", {}).get("name"),
+                    "away_team": m.get("awayTeam", {}).get("name"),
+                    "score": m.get("score"),
+                })
+
+            # Cache the data
+            live_matches_cache.data = simplified_matches
+            live_matches_cache.expires_at = datetime.utcnow() + timedelta(seconds=LIVE_MATCHES_CACHE_TTL)
+
+            return jsonify(simplified_matches)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
