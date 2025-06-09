@@ -84,6 +84,11 @@ def expected_goals_dynamic(home_attack, away_defense, avg_home_goals,
     exp_away = away_attack * home_defense * avg_away_goals
     return exp_home, exp_away
 
+# Caching for live matches
+live_matches_cache = CacheItem(data=None, expires_at=datetime.utcnow())
+live_matches_lock = threading.Lock()
+LIVE_MATCHES_CACHE_TTL = 300  # 5 minutes cache
+
 @app.route('/')
 def home():
     return "Welcome to the Flask API. Use /api/predict with params: home_team_id, away_team_id, home_odds, draw_odds, away_odds."
@@ -169,6 +174,52 @@ def predict():
         }
 
         return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/live-matches')
+def live_matches():
+    try:
+        date_from = request.args.get("dateFrom", datetime.utcnow().strftime("%Y-%m-%d"))
+        date_to = request.args.get("dateTo", datetime.utcnow().strftime("%Y-%m-%d"))
+
+        with live_matches_lock:
+            # Check cache expiry
+            if live_matches_cache.data and live_matches_cache.expires_at > datetime.utcnow():
+                return jsonify(live_matches_cache.data)
+
+            # Fetch live/upcoming matches from external API
+            url = f"{API_BASE_URL}/matches"
+            params = {
+                "dateFrom": date_from,
+                "dateTo": date_to,
+                # You can add more filters if needed
+            }
+            response = requests.get(url, headers=HEADERS, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            matches = data.get("matches", [])
+
+            # Simplify matches data to only essential info
+            simplified_matches = []
+            for m in matches:
+                simplified_matches.append({
+                    "match_id": m.get("id"),
+                    "utc_date": m.get("utcDate"),
+                    "status": m.get("status"),
+                    "home_team": m.get("homeTeam", {}).get("name"),
+                    "away_team": m.get("awayTeam", {}).get("name"),
+                    "score": m.get("score"),
+                })
+
+            # Cache the data
+            live_matches_cache.data = simplified_matches
+            live_matches_cache.expires_at = datetime.utcnow() + timedelta(seconds=LIVE_MATCHES_CACHE_TTL)
+
+            return jsonify(simplified_matches)
 
     except Exception as e:
         traceback.print_exc()
