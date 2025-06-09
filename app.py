@@ -3,9 +3,10 @@ from flask_cors import CORS
 import requests
 from datetime import datetime
 import traceback
+import os
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
 @app.route('/')
 def home():
@@ -18,10 +19,9 @@ def get_odds():
         "X-Auth-Token": "a99f297052584b1f85b4a62734cbd330"  # Your valid token
     }
 
-    # Get query parameters or fallback to today
     date_from = request.args.get('dateFrom', datetime.today().strftime('%Y-%m-%d'))
     date_to = request.args.get('dateTo', datetime.today().strftime('%Y-%m-%d'))
-    competition = request.args.get('competition')  # Optional filter
+    competition = request.args.get('competition')
 
     params = {
         "dateFrom": date_from,
@@ -32,10 +32,8 @@ def get_odds():
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
-
         matches = data.get("matches", [])
 
-        # If competition filter is specified, filter matches locally
         if competition:
             matches = [m for m in matches if m.get("competition", {}).get("code") == competition]
 
@@ -57,5 +55,7 @@ def get_odds():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+# ✅ Production-safe run block
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
